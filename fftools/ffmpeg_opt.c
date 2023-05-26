@@ -80,7 +80,6 @@ int debug_ts          = 0;
 int exit_on_error     = 0;
 int abort_on_flags    = 0;
 int print_stats       = -1;
-int qp_hist           = 0;
 int stdin_interaction = 1;
 float max_error_rate  = 2.0/3;
 char *filter_nbthreads;
@@ -623,7 +622,8 @@ static int opt_recording_timestamp(void *optctx, const char *opt, const char *ar
     return 0;
 }
 
-const AVCodec *find_codec_or_die(const char *name, enum AVMediaType type, int encoder)
+const AVCodec *find_codec_or_die(void *logctx, const char *name,
+                                 enum AVMediaType type, int encoder)
 {
     const AVCodecDescriptor *desc;
     const char *codec_string = encoder ? "encoder" : "decoder";
@@ -637,16 +637,16 @@ const AVCodec *find_codec_or_die(const char *name, enum AVMediaType type, int en
         codec = encoder ? avcodec_find_encoder(desc->id) :
                           avcodec_find_decoder(desc->id);
         if (codec)
-            av_log(NULL, AV_LOG_VERBOSE, "Matched %s '%s' for codec '%s'.\n",
+            av_log(logctx, AV_LOG_VERBOSE, "Matched %s '%s' for codec '%s'.\n",
                    codec_string, codec->name, desc->name);
     }
 
     if (!codec) {
-        av_log(NULL, AV_LOG_FATAL, "Unknown %s '%s'\n", codec_string, name);
+        av_log(logctx, AV_LOG_FATAL, "Unknown %s '%s'\n", codec_string, name);
         exit_program(1);
     }
     if (codec->type != type && !recast_media) {
-        av_log(NULL, AV_LOG_FATAL, "Invalid %s type '%s'\n", codec_string, name);
+        av_log(logctx, AV_LOG_FATAL, "Invalid %s type '%s'\n", codec_string, name);
         exit_program(1);
     }
     return codec;
@@ -1106,26 +1106,22 @@ static int opt_audio_qscale(void *optctx, const char *opt, const char *arg)
 
 static int opt_filter_complex(void *optctx, const char *opt, const char *arg)
 {
-    FilterGraph *fg = ALLOC_ARRAY_ELEM(filtergraphs, nb_filtergraphs);
-
-    fg->index      = nb_filtergraphs - 1;
-    fg->graph_desc = av_strdup(arg);
-    if (!fg->graph_desc)
+    char *graph_desc = av_strdup(arg);
+    if (!graph_desc)
         return AVERROR(ENOMEM);
+
+    fg_create(graph_desc);
 
     return 0;
 }
 
 static int opt_filter_complex_script(void *optctx, const char *opt, const char *arg)
 {
-    FilterGraph *fg;
     char *graph_desc = file_read(arg);
     if (!graph_desc)
         return AVERROR(EINVAL);
 
-    fg = ALLOC_ARRAY_ELEM(filtergraphs, nb_filtergraphs);
-    fg->index      = nb_filtergraphs - 1;
-    fg->graph_desc = graph_desc;
+    fg_create(graph_desc);
 
     return 0;
 }
@@ -1343,6 +1339,22 @@ int opt_timelimit(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
+#if FFMPEG_OPT_QPHIST
+static int opt_qphist(void *optctx, const char *opt, const char *arg)
+{
+    av_log(NULL, AV_LOG_WARNING, "Option -%s is deprecated and has no effect\n", opt);
+    return 0;
+}
+#endif
+
+#if FFMPEG_OPT_ADRIFT_THRESHOLD
+static int opt_adrift_threshold(void *optctx, const char *opt, const char *arg)
+{
+    av_log(NULL, AV_LOG_WARNING, "Option -%s is deprecated and has no effect\n", opt);
+    return 0;
+}
+#endif
+
 #define OFFSET(x) offsetof(OptionsContext, x)
 const OptionDef options[] = {
     /* main options */
@@ -1442,6 +1454,9 @@ const OptionDef options[] = {
     { "readrate",       HAS_ARG | OPT_FLOAT | OPT_OFFSET |
                         OPT_EXPERT | OPT_INPUT,                      { .off = OFFSET(readrate) },
         "read input at specified rate", "speed" },
+    { "readrate_initial_burst", HAS_ARG | OPT_DOUBLE | OPT_OFFSET |
+                                OPT_EXPERT | OPT_INPUT,              { .off = OFFSET(readrate_initial_burst) },
+        "The initial amount of input to burst read before imposing any readrate", "seconds" },
     { "target",         HAS_ARG | OPT_PERFILE | OPT_OUTPUT,          { .func_arg = opt_target },
         "specify target file type (\"vcd\", \"svcd\", \"dvd\", \"dv\" or \"dv50\" "
         "with optional prefixes \"pal-\", \"ntsc-\" or \"film-\")", "type" },
@@ -1449,8 +1464,10 @@ const OptionDef options[] = {
         "set video sync method globally; deprecated, use -fps_mode", "" },
     { "frame_drop_threshold", HAS_ARG | OPT_FLOAT | OPT_EXPERT,      { &frame_drop_threshold },
         "frame drop threshold", "" },
-    { "adrift_threshold", HAS_ARG | OPT_FLOAT | OPT_EXPERT,          { &audio_drift_threshold },
-        "audio drift threshold", "threshold" },
+#if FFMPEG_OPT_ADRIFT_THRESHOLD
+    { "adrift_threshold", HAS_ARG | OPT_EXPERT,                      { .func_arg = opt_adrift_threshold },
+        "deprecated, does nothing", "threshold" },
+#endif
     { "copyts",         OPT_BOOL | OPT_EXPERT,                       { &copy_ts },
         "copy timestamps" },
     { "start_at_zero",  OPT_BOOL | OPT_EXPERT,                       { &start_at_zero },
@@ -1543,6 +1560,19 @@ const OptionDef options[] = {
         { .off = OFFSET(bits_per_raw_sample) },
         "set the number of bits per raw sample", "number" },
 
+    { "stats_enc_pre",      HAS_ARG | OPT_SPEC | OPT_EXPERT | OPT_OUTPUT | OPT_STRING, { .off = OFFSET(enc_stats_pre)      },
+        "write encoding stats before encoding" },
+    { "stats_enc_post",     HAS_ARG | OPT_SPEC | OPT_EXPERT | OPT_OUTPUT | OPT_STRING, { .off = OFFSET(enc_stats_post)     },
+        "write encoding stats after encoding" },
+    { "stats_mux_pre",      HAS_ARG | OPT_SPEC | OPT_EXPERT | OPT_OUTPUT | OPT_STRING, { .off = OFFSET(mux_stats)          },
+        "write packets stats before muxing" },
+    { "stats_enc_pre_fmt",  HAS_ARG | OPT_SPEC | OPT_EXPERT | OPT_OUTPUT | OPT_STRING, { .off = OFFSET(enc_stats_pre_fmt)  },
+        "format of the stats written with -stats_enc_pre" },
+    { "stats_enc_post_fmt", HAS_ARG | OPT_SPEC | OPT_EXPERT | OPT_OUTPUT | OPT_STRING, { .off = OFFSET(enc_stats_post_fmt) },
+        "format of the stats written with -stats_enc_post" },
+    { "stats_mux_pre_fmt",  HAS_ARG | OPT_SPEC | OPT_EXPERT | OPT_OUTPUT | OPT_STRING, { .off = OFFSET(mux_stats_fmt)      },
+        "format of the stats written with -stats_mux_pre" },
+
     /* video options */
     { "vframes",      OPT_VIDEO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_video_frames },
         "set the number of video frames to output", "number" },
@@ -1613,8 +1643,10 @@ const OptionDef options[] = {
     { "vtag",         OPT_VIDEO | HAS_ARG | OPT_EXPERT  | OPT_PERFILE |
                       OPT_INPUT | OPT_OUTPUT,                                    { .func_arg = opt_old2new },
         "force video tag/fourcc", "fourcc/tag" },
-    { "qphist",       OPT_VIDEO | OPT_BOOL | OPT_EXPERT ,                        { &qp_hist },
-        "show QP histogram" },
+#if FFMPEG_OPT_QPHIST
+    { "qphist",       OPT_VIDEO | OPT_EXPERT ,                        { .func_arg = opt_qphist },
+        "deprecated, does nothing" },
+#endif
     { "fps_mode",     OPT_VIDEO | HAS_ARG | OPT_STRING | OPT_EXPERT |
                       OPT_SPEC | OPT_OUTPUT,                                     { .off = OFFSET(fps_mode) },
         "set framerate mode for matching video streams; overrides vsync" },
@@ -1627,8 +1659,6 @@ const OptionDef options[] = {
     { "force_key_frames", OPT_VIDEO | OPT_STRING | HAS_ARG | OPT_EXPERT |
                           OPT_SPEC | OPT_OUTPUT,                                 { .off = OFFSET(forced_key_frames) },
         "force key frames at specified timestamps", "timestamps" },
-    { "ab",           OPT_VIDEO | HAS_ARG | OPT_PERFILE | OPT_OUTPUT,            { .func_arg = opt_bitrate },
-        "audio bitrate (please use -b:a)", "bitrate" },
     { "b",            OPT_VIDEO | HAS_ARG | OPT_PERFILE | OPT_OUTPUT,            { .func_arg = opt_bitrate },
         "video bitrate (please use -b:v)", "bitrate" },
     { "hwaccel",          OPT_VIDEO | OPT_STRING | HAS_ARG | OPT_EXPERT |
@@ -1648,6 +1678,11 @@ const OptionDef options[] = {
     { "autoscale",        HAS_ARG | OPT_BOOL | OPT_SPEC |
                           OPT_EXPERT | OPT_OUTPUT,                               { .off = OFFSET(autoscale) },
         "automatically insert a scale filter at the end of the filter graph" },
+    { "fix_sub_duration_heartbeat", OPT_VIDEO | OPT_BOOL | OPT_EXPERT |
+                                    OPT_SPEC | OPT_OUTPUT,                       { .off = OFFSET(fix_sub_duration_heartbeat) },
+        "set this video output stream to be a heartbeat stream for "
+        "fix_sub_duration, according to which subtitles should be split at "
+        "random access points" },
 
     /* audio options */
     { "aframes",        OPT_AUDIO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_audio_frames },
@@ -1665,6 +1700,8 @@ const OptionDef options[] = {
     { "acodec",         OPT_AUDIO | HAS_ARG  | OPT_PERFILE |
                         OPT_INPUT | OPT_OUTPUT,                                    { .func_arg = opt_audio_codec },
         "force audio codec ('copy' to copy stream)", "codec" },
+    { "ab",             OPT_AUDIO | HAS_ARG | OPT_PERFILE | OPT_OUTPUT,            { .func_arg = opt_bitrate },
+        "audio bitrate (please use -b:a)", "bitrate" },
     { "atag",           OPT_AUDIO | HAS_ARG  | OPT_EXPERT | OPT_PERFILE |
                         OPT_OUTPUT,                                                { .func_arg = opt_old2new },
         "force audio tag/fourcc", "fourcc/tag" },
@@ -1739,7 +1776,7 @@ const OptionDef options[] = {
 
 #if CONFIG_VAAPI
     { "vaapi_device", HAS_ARG | OPT_EXPERT, { .func_arg = opt_vaapi_device },
-        "set VAAPI hardware device (DRM path or X11 display name)", "device" },
+        "set VAAPI hardware device (DirectX adapter index, DRM path or X11 display name)", "device" },
 #endif
 
 #if CONFIG_QSV

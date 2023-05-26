@@ -44,10 +44,11 @@
 
 int avcodec_default_execute(AVCodecContext *c, int (*func)(AVCodecContext *c2, void *arg2), void *arg, int *ret, int count, int size)
 {
-    int i;
+    size_t i;
 
     for (i = 0; i < count; i++) {
-        int r = func(c, (char *)arg + i * size);
+        size_t offset = i * size;
+        int r = func(c, FF_PTR_ADD((char *)arg, offset));
         if (ret)
             ret[i] = r;
     }
@@ -266,7 +267,12 @@ FF_ENABLE_DEPRECATION_WARNINGS
         goto free_and_end;
     }
 
-    avctx->frame_number = 0;
+    avctx->frame_num = 0;
+#if FF_API_AVCTX_FRAME_NUMBER
+FF_DISABLE_DEPRECATION_WARNINGS
+    avctx->frame_number = avctx->frame_num;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
     avctx->codec_descriptor = avcodec_descriptor_get(avctx->codec_id);
 
     if ((avctx->codec->capabilities & AV_CODEC_CAP_EXPERIMENTAL) &&
@@ -349,11 +355,6 @@ FF_ENABLE_DEPRECATION_WARNINGS
             ret = AVERROR(EINVAL);
             goto free_and_end;
         }
-
-#if FF_API_AVCTX_TIMEBASE
-        if (avctx->framerate.num > 0 && avctx->framerate.den > 0)
-            avctx->time_base = av_inv_q(av_mul_q(avctx->framerate, (AVRational){avctx->ticks_per_frame, 1}));
-#endif
     }
     if (codec->priv_class)
         av_assert0(*(const AVClass **)avctx->priv_data == codec->priv_class);

@@ -141,7 +141,8 @@ end:
 }
 
 static int fn(get_power)(AVFilterContext *ctx, AudioFIRContext *s,
-                         int cur_nb_taps, int ch)
+                         int cur_nb_taps, int ch,
+                         ftype *time)
 {
     ftype ch_gain = 1;
 
@@ -151,7 +152,6 @@ static int fn(get_power)(AVFilterContext *ctx, AudioFIRContext *s,
         break;
     case 0:
         {
-            ftype *time = (ftype *)s->norm_ir->extended_data[ch];
             ftype sum = 0;
 
             for (int i = 0; i < cur_nb_taps; i++)
@@ -161,7 +161,6 @@ static int fn(get_power)(AVFilterContext *ctx, AudioFIRContext *s,
         break;
     case 1:
         {
-            ftype *time = (ftype *)s->norm_ir->extended_data[ch];
             ftype sum = 0;
 
             for (int i = 0; i < cur_nb_taps; i++)
@@ -171,7 +170,6 @@ static int fn(get_power)(AVFilterContext *ctx, AudioFIRContext *s,
         break;
     case 2:
         {
-            ftype *time = (ftype *)s->norm_ir->extended_data[ch];
             ftype sum = 0;
 
             for (int i = 0; i < cur_nb_taps; i++)
@@ -182,7 +180,7 @@ static int fn(get_power)(AVFilterContext *ctx, AudioFIRContext *s,
     case 3:
     case 4:
         {
-            ftype *inc, *outc, scale;
+            ftype *inc, *outc, scale, power;
             AVTXContext *tx;
             av_tx_fn tx_fn;
             int ret, size;
@@ -205,7 +203,6 @@ static int fn(get_power)(AVFilterContext *ctx, AudioFIRContext *s,
             }
 
             {
-                ftype power, *time = (ftype *)s->norm_ir->extended_data[ch];
                 memcpy(inc, time, cur_nb_taps * sizeof(SAMPLE_FORMAT));
                 tx_fn(tx, outc, inc, sizeof(SAMPLE_FORMAT));
 
@@ -233,7 +230,6 @@ static int fn(get_power)(AVFilterContext *ctx, AudioFIRContext *s,
     }
 
     if (ch_gain != 1. || s->ir_gain != 1.) {
-        ftype *time = (ftype *)s->norm_ir->extended_data[ch];
         ftype gain = ch_gain * s->ir_gain;
 
         av_log(ctx, AV_LOG_DEBUG, "ch%d gain %f\n", ch, gain);
@@ -248,45 +244,24 @@ static int fn(get_power)(AVFilterContext *ctx, AudioFIRContext *s,
 }
 
 static void fn(convert_channel)(AVFilterContext *ctx, AudioFIRContext *s, int ch,
-                                AudioFIRSegment *seg)
+                                AudioFIRSegment *seg, int coeff_partition, int selir)
 {
-    const int coeff_partition = seg->loading[ch];
     const int coffset = coeff_partition * seg->coeff_size;
-    const int selir = s->selir;
     const int nb_taps = s->nb_taps[selir];
-    ftype *tsrc = (ftype *)s->ir[selir]->extended_data[!s->one2many * ch];
-    ftype *time = (ftype *)s->norm_ir->extended_data[ch];
+    ftype *time = (ftype *)s->norm_ir[selir]->extended_data[ch];
     ftype *tempin = (ftype *)seg->tempin->extended_data[ch];
     ftype *tempout = (ftype *)seg->tempout->extended_data[ch];
     ctype *coeff = (ctype *)seg->coeff->extended_data[ch];
-    int *loaded = (int *)seg->loaded->extended_data[ch];
     const int remaining = nb_taps - (seg->input_offset + coeff_partition * seg->part_size);
     const int size = remaining >= seg->part_size ? seg->part_size : remaining;
-
-    if (loaded[coeff_partition] == selir + 1)
-        return;
-    loaded[coeff_partition] = selir + 1;
-
-    memcpy(time, tsrc, sizeof(*time) * nb_taps);
-    for (int i = FFMAX(1, s->length * nb_taps); i < nb_taps; i++)
-        time[i] = 0;
-
-#if DEPTH == 32
-    get_power_float(ctx, s, nb_taps, ch);
-#else
-    get_power_double(ctx, s, nb_taps, ch);
-#endif
-
-    av_log(ctx, AV_LOG_DEBUG, "channel: %d\n", ch);
 
     memset(tempin + size, 0, sizeof(*tempin) * (seg->block_size - size));
     memcpy(tempin, time + seg->input_offset + coeff_partition * seg->part_size,
            size * sizeof(*tempin));
-
     seg->ctx_fn(seg->ctx[ch], tempout, tempin, sizeof(*tempin));
-
     memcpy(coeff + coffset, tempout, seg->coeff_size * sizeof(*coeff));
 
+    av_log(ctx, AV_LOG_DEBUG, "channel: %d\n", ch);
     av_log(ctx, AV_LOG_DEBUG, "nb_partitions: %d\n", seg->nb_partitions);
     av_log(ctx, AV_LOG_DEBUG, "partition size: %d\n", seg->part_size);
     av_log(ctx, AV_LOG_DEBUG, "block size: %d\n", seg->block_size);
@@ -310,23 +285,25 @@ static void fn(fir_fadd)(AudioFIRContext *s, ftype *dst, const ftype *src, int n
     }
 }
 
-static int fn(fir_quantum)(AVFilterContext *ctx, AVFrame *out, int ch, int offset)
+static int fn(fir_quantum)(AVFilterContext *ctx, AVFrame *out, int ch, int ioffset, int offset, int selir)
 {
     AudioFIRContext *s = ctx->priv;
-    const ftype *in = (const ftype *)s->in->extended_data[ch] + offset;
-    ftype *blockout, *buf, *ptr = (ftype *)out->extended_data[ch] + offset;
+    const ftype *in = (const ftype *)s->in->extended_data[ch] + ioffset;
+    ftype *blockout, *ptr = (ftype *)out->extended_data[ch] + offset;
     const int min_part_size = s->min_part_size;
     const int nb_samples = FFMIN(min_part_size, out->nb_samples - offset);
-    const int nb_segments = s->nb_segments;
+    const int nb_segments = s->nb_segments[selir];
     const float dry_gain = s->dry_gain;
+    const float wet_gain = s->wet_gain;
 
     for (int segment = 0; segment < nb_segments; segment++) {
-        AudioFIRSegment *seg = &s->seg[segment];
+        AudioFIRSegment *seg = &s->seg[selir][segment];
         ftype *src = (ftype *)seg->input->extended_data[ch];
         ftype *dst = (ftype *)seg->output->extended_data[ch];
         ftype *sumin = (ftype *)seg->sumin->extended_data[ch];
         ftype *sumout = (ftype *)seg->sumout->extended_data[ch];
         ftype *tempin = (ftype *)seg->tempin->extended_data[ch];
+        ftype *buf = (ftype *)seg->buffer->extended_data[ch];
         int *output_offset = &seg->output_offset[ch];
         const int nb_partitions = seg->nb_partitions;
         const int input_offset = seg->input_offset;
@@ -334,7 +311,9 @@ static int fn(fir_quantum)(AVFilterContext *ctx, AVFrame *out, int ch, int offse
         int j;
 
         seg->part_index[ch] = seg->part_index[ch] % nb_partitions;
-        if (min_part_size >= 8) {
+        if (dry_gain == 1.f) {
+            memcpy(src + input_offset, in, nb_samples * sizeof(*src));
+        } else if (min_part_size >= 8) {
 #if DEPTH == 32
             s->fdsp->vector_fmul_scalar(src + input_offset, in, dry_gain, FFALIGN(nb_samples, 4));
 #else
@@ -359,22 +338,13 @@ static int fn(fir_quantum)(AVFilterContext *ctx, AVFrame *out, int ch, int offse
         }
 
         memset(sumin, 0, sizeof(*sumin) * seg->fft_length);
+
         blockout = (ftype *)seg->blockout->extended_data[ch] + seg->part_index[ch] * seg->block_size;
         memset(tempin + part_size, 0, sizeof(*tempin) * (seg->block_size - part_size));
         memcpy(tempin, src, sizeof(*src) * part_size);
-
         seg->tx_fn(seg->tx[ch], blockout, tempin, sizeof(ftype));
 
         j = seg->part_index[ch];
-        if (seg->loading[ch] < nb_partitions) {
-#if DEPTH == 32
-            convert_channel_float(ctx, s, ch, seg);
-#else
-            convert_channel_double(ctx, s, ch, seg);
-#endif
-            seg->loading[ch]++;
-        }
-
         for (int i = 0; i < nb_partitions; i++) {
             const int input_partition = j;
             const int coeff_partition = i;
@@ -395,33 +365,31 @@ static int fn(fir_quantum)(AVFilterContext *ctx, AVFrame *out, int ch, int offse
 
         seg->itx_fn(seg->itx[ch], sumout, sumin, sizeof(ctype));
 
-        buf = (ftype *)seg->buffer->extended_data[ch];
         fn(fir_fadd)(s, buf, sumout, part_size);
-
         memcpy(dst, buf, part_size * sizeof(*dst));
         memcpy(buf, sumout + part_size, part_size * sizeof(*buf));
 
-        seg->part_index[ch] = (seg->part_index[ch] + 1) % nb_partitions;
+        fn(fir_fadd)(s, ptr, dst, nb_samples);
 
         if (part_size != min_part_size)
             memmove(src, src + min_part_size, (seg->input_size - min_part_size) * sizeof(*src));
 
-        fn(fir_fadd)(s, ptr, dst, nb_samples);
+        seg->part_index[ch] = (seg->part_index[ch] + 1) % nb_partitions;
     }
 
-    if (s->wet_gain == 1.f)
+    if (wet_gain == 1.f)
         return 0;
 
     if (min_part_size >= 8) {
 #if DEPTH == 32
-        s->fdsp->vector_fmul_scalar(ptr, ptr, s->wet_gain, FFALIGN(nb_samples, 4));
+        s->fdsp->vector_fmul_scalar(ptr, ptr, wet_gain, FFALIGN(nb_samples, 4));
 #else
-        s->fdsp->vector_dmul_scalar(ptr, ptr, s->wet_gain, FFALIGN(nb_samples, 8));
+        s->fdsp->vector_dmul_scalar(ptr, ptr, wet_gain, FFALIGN(nb_samples, 8));
 #endif
         emms_c();
     } else {
         for (int n = 0; n < nb_samples; n++)
-            ptr[n] *= s->wet_gain;
+            ptr[n] *= wet_gain;
     }
 
     return 0;

@@ -63,7 +63,21 @@ typedef OSStatus (*getParameterSetAtIndex)(CMFormatDescriptionRef videoDesc,
                                            size_t *parameterSetCountOut,
                                            int *NALUnitHeaderLengthOut);
 
-//These symbols may not be present
+/*
+ * Symbols that aren't available in MacOS 10.8 and iOS 8.0 need to be accessed
+ * from compat_keys, or it will cause compiler errors when compiling for older
+ * OS versions.
+ *
+ * For example, kVTCompressionPropertyKey_H264EntropyMode was added in
+ * MacOS 10.9. If this constant were used directly, a compiler would generate
+ * an error when it has access to the MacOS 10.8 headers, but does not have
+ * 10.9 headers.
+ *
+ * Runtime errors will still occur when unknown keys are set. A warning is
+ * logged and encoding continues where possible.
+ *
+ * When adding new symbols, they should be loaded/set in loadVTEncSymbols().
+ */
 static struct{
     CFStringRef kCVImageBufferColorPrimaries_ITU_R_2020;
     CFStringRef kCVImageBufferTransferFunction_ITU_R_2020;
@@ -105,6 +119,7 @@ static struct{
 
     CFStringRef kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder;
     CFStringRef kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder;
+    CFStringRef kVTVideoEncoderSpecification_EnableLowLatencyRateControl;
 
     getParameterSetAtIndex CMVideoFormatDescriptionGetHEVCParameterSetAtIndex;
 } compat_keys;
@@ -120,7 +135,7 @@ do{                                                                     \
 
 static pthread_once_t once_ctrl = PTHREAD_ONCE_INIT;
 
-static void loadVTEncSymbols(){
+static void loadVTEncSymbols(void){
     compat_keys.CMVideoFormatDescriptionGetHEVCParameterSetAtIndex =
         (getParameterSetAtIndex)dlsym(
             RTLD_DEFAULT,
@@ -171,6 +186,8 @@ static void loadVTEncSymbols(){
             "EnableHardwareAcceleratedVideoEncoder");
     GET_SYM(kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
             "RequireHardwareAcceleratedVideoEncoder");
+    GET_SYM(kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
+                "EnableLowLatencyRateControl");
 }
 
 typedef enum VT_H264Profile {
@@ -847,13 +864,22 @@ static int get_cv_pixel_format(AVCodecContext* avctx,
                                int* av_pixel_format,
                                int* range_guessed)
 {
+    const char *range_name;
     if (range_guessed) *range_guessed = range != AVCOL_RANGE_MPEG &&
                                         range != AVCOL_RANGE_JPEG;
 
     //MPEG range is used when no range is set
     *av_pixel_format = av_map_videotoolbox_format_from_pixfmt2(fmt, range == AVCOL_RANGE_JPEG);
+    if (*av_pixel_format)
+        return 0;
 
-    return *av_pixel_format ? 0 : AVERROR(EINVAL);
+    range_name = av_color_range_name(range);
+    av_log(avctx, AV_LOG_ERROR,
+        "Could not get pixel format for color format '%s' range '%s'.\n",
+        av_get_pix_fmt_name(fmt),
+        range_name ? range_name : "Unknown");
+
+    return AVERROR(EINVAL);
 }
 
 static void add_color_attr(AVCodecContext *avctx, CFMutableDictionaryRef dict) {
@@ -1236,6 +1262,13 @@ static int vtenc_create_encoder(AVCodecContext   *avctx,
                                           compat_keys.kVTCompressionPropertyKey_TargetQualityForAlpha,
                                           alpha_quality_num);
             CFRelease(alpha_quality_num);
+
+            if (status) {
+                av_log(avctx,
+                       AV_LOG_ERROR,
+                       "Error setting alpha quality: %d\n",
+                       status);
+            }
         }
     }
 
@@ -1429,6 +1462,17 @@ static int vtenc_create_encoder(AVCodecContext   *avctx,
 
         if (status) {
             av_log(avctx, AV_LOG_ERROR, "Error setting realtime property: %d\n", status);
+        }
+    }
+
+    // low-latency mode: eliminate frame reordering, follow a one-in-one-out encoding mode
+    if ((avctx->flags & AV_CODEC_FLAG_LOW_DELAY) && avctx->codec_id == AV_CODEC_ID_H264) {
+        status = VTSessionSetProperty(vtctx->session,
+                                      compat_keys.kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
+                                      kCFBooleanTrue);
+
+        if (status) {
+            av_log(avctx, AV_LOG_ERROR, "Error setting low latency property: %d\n", status);
         }
     }
 
@@ -1641,8 +1685,8 @@ static int find_sei_end(AVCodecContext *avctx,
 {
     int nal_type;
     size_t sei_payload_size = 0;
-    *sei_end = NULL;
     uint8_t *nal_start = nal_data;
+    *sei_end = NULL;
 
     if (!nal_size)
         return 0;
@@ -2032,7 +2076,7 @@ static int vtenc_cm_to_avpacket(
                 return AVERROR_EXTERNAL;
             }
 
-            int status = get_params_size(avctx, vid_fmt, &header_size);
+            status = get_params_size(avctx, vid_fmt, &header_size);
             if (status) return status;
         }
 
@@ -2146,18 +2190,8 @@ static int get_cv_pixel_info(
         return AVERROR(EINVAL);
 
     status = get_cv_pixel_format(avctx, av_format, av_color_range, color, &range_guessed);
-    if (status) {
-        av_log(avctx,
-            AV_LOG_ERROR,
-            "Could not get pixel format for color format '%s' range '%s'.\n",
-            av_get_pix_fmt_name(av_format),
-            av_color_range > AVCOL_RANGE_UNSPECIFIED &&
-            av_color_range < AVCOL_RANGE_NB ?
-               av_color_range_name(av_color_range) :
-               "Unknown");
-
-        return AVERROR(EINVAL);
-    }
+    if (status)
+        return status;
 
     if (range_guessed) {
         if (!vtctx->warned_color_range) {
@@ -2339,7 +2373,7 @@ static int create_cv_pixel_buffer(AVCodecContext   *avctx,
             status
         );
 
-        return AVERROR_EXTERNAL;
+        return status;
     }
 
     pix_buf_pool = VTCompressionSessionGetPixelBufferPool(vtctx->session);
@@ -2556,6 +2590,7 @@ static int vtenc_populate_extradata(AVCodecContext   *avctx,
     pool = VTCompressionSessionGetPixelBufferPool(vtctx->session);
     if(!pool){
         av_log(avctx, AV_LOG_ERROR, "Error getting pixel buffer pool.\n");
+        status = AVERROR_EXTERNAL;
         goto pe_cleanup;
     }
 
@@ -2565,6 +2600,7 @@ static int vtenc_populate_extradata(AVCodecContext   *avctx,
 
     if(status != kCVReturnSuccess){
         av_log(avctx, AV_LOG_ERROR, "Error creating frame from pool: %d\n", status);
+        status = AVERROR_EXTERNAL;
         goto pe_cleanup;
     }
 
@@ -2582,7 +2618,7 @@ static int vtenc_populate_extradata(AVCodecContext   *avctx,
                AV_LOG_ERROR,
                "Error sending frame for extradata: %d\n",
                status);
-
+        status = AVERROR_EXTERNAL;
         goto pe_cleanup;
     }
 
@@ -2590,8 +2626,10 @@ static int vtenc_populate_extradata(AVCodecContext   *avctx,
     status = VTCompressionSessionCompleteFrames(vtctx->session,
                                                 kCMTimeIndefinite);
 
-    if (status)
+    if (status) {
+        status = AVERROR_EXTERNAL;
         goto pe_cleanup;
+    }
 
     status = vtenc_q_pop(vtctx, 0, &buf, NULL);
     if (status) {

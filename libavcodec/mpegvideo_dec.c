@@ -320,26 +320,33 @@ int ff_mpv_frame_start(MpegEncContext *s, AVCodecContext *avctx)
             pic->reference = 3;
     }
 
+#if FF_API_FRAME_PICTURE_NUMBER
+FF_DISABLE_DEPRECATION_WARNINGS
     pic->f->coded_picture_number = s->coded_picture_number++;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
 
     if (alloc_picture(s, pic) < 0)
         return -1;
 
     s->current_picture_ptr = pic;
     // FIXME use only the vars from current_pic
-    s->current_picture_ptr->f->top_field_first = s->top_field_first;
+    s->current_picture_ptr->f->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST * !!s->top_field_first;
     if (s->codec_id == AV_CODEC_ID_MPEG1VIDEO ||
         s->codec_id == AV_CODEC_ID_MPEG2VIDEO) {
         if (s->picture_structure != PICT_FRAME)
-            s->current_picture_ptr->f->top_field_first =
-                (s->picture_structure == PICT_TOP_FIELD) == s->first_field;
+            s->current_picture_ptr->f->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST *
+                ((s->picture_structure == PICT_TOP_FIELD) == s->first_field);
     }
-    s->current_picture_ptr->f->interlaced_frame = !s->progressive_frame &&
-                                                 !s->progressive_sequence;
+    s->current_picture_ptr->f->flags |= AV_FRAME_FLAG_INTERLACED * (!s->progressive_frame &&
+                                                                    !s->progressive_sequence);
     s->current_picture_ptr->field_picture      =  s->picture_structure != PICT_FRAME;
 
     s->current_picture_ptr->f->pict_type = s->pict_type;
-    s->current_picture_ptr->f->key_frame = s->pict_type == AV_PICTURE_TYPE_I;
+    if (s->pict_type == AV_PICTURE_TYPE_I)
+        s->current_picture.f->flags |= AV_FRAME_FLAG_KEY;
+    else
+        s->current_picture.f->flags &= ~AV_FRAME_FLAG_KEY;
 
     if ((ret = ff_mpeg_ref_picture(s->avctx, &s->current_picture,
                                    s->current_picture_ptr)) < 0)
@@ -378,7 +385,7 @@ int ff_mpv_frame_start(MpegEncContext *s, AVCodecContext *avctx)
         s->last_picture_ptr = &s->picture[idx];
 
         s->last_picture_ptr->reference    = 3;
-        s->last_picture_ptr->f->key_frame = 0;
+        s->last_picture_ptr->f->flags &= ~AV_FRAME_FLAG_KEY;
         s->last_picture_ptr->f->pict_type = AV_PICTURE_TYPE_P;
 
         if (alloc_picture(s, s->last_picture_ptr) < 0) {
@@ -420,7 +427,7 @@ int ff_mpv_frame_start(MpegEncContext *s, AVCodecContext *avctx)
         s->next_picture_ptr = &s->picture[idx];
 
         s->next_picture_ptr->reference   = 3;
-        s->next_picture_ptr->f->key_frame = 0;
+        s->next_picture_ptr->f->flags &= ~AV_FRAME_FLAG_KEY;
         s->next_picture_ptr->f->pict_type = AV_PICTURE_TYPE_P;
 
         if (alloc_picture(s, s->next_picture_ptr) < 0) {
@@ -554,14 +561,6 @@ void ff_mpeg_flush(AVCodecContext *avctx)
 
     s->mb_x = s->mb_y = 0;
 
-#if FF_API_FLAG_TRUNCATED
-    s->parse_context.state = -1;
-    s->parse_context.frame_start_found = 0;
-    s->parse_context.overread = 0;
-    s->parse_context.overread_index = 0;
-    s->parse_context.index = 0;
-    s->parse_context.last_index = 0;
-#endif
     s->bitstream_buffer_size = 0;
     s->pp_time = 0;
 }

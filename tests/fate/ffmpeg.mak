@@ -117,6 +117,21 @@ fate-ffmpeg-fix_sub_duration: CMD = fmtstdout srt -fix_sub_duration \
   -real_time 1 -f lavfi \
   -i "movie=$(TARGET_SAMPLES)/sub/Closedcaption_rollup.m2v[out0+subcc]"
 
+# Basic test for fix_sub_duration_heartbeat, which causes a buffered subtitle
+# to be pushed out when a video keyframe is received from an encoder.
+FATE_SAMPLES_FFMPEG-$(call FILTERDEMDECENCMUX, MOVIE, MPEGVIDEO, \
+                           MPEG2VIDEO, SUBRIP, SRT, LAVFI_INDEV  \
+                           MPEGVIDEO_PARSER CCAPTION_DECODER \
+                           MPEG2VIDEO_ENCODER NULL_MUXER PIPE_PROTOCOL) \
+                           += fate-ffmpeg-fix_sub_duration_heartbeat
+fate-ffmpeg-fix_sub_duration_heartbeat: CMD = fmtstdout srt -fix_sub_duration \
+  -real_time 1 -f lavfi \
+  -i "movie=$(TARGET_SAMPLES)/sub/Closedcaption_rollup.m2v[out0+subcc]" \
+  -map 0:v  -map 0:s -fix_sub_duration_heartbeat:v:0 \
+  -c:v mpeg2video -b:v 2M -g 30 -sc_threshold 1000000000 \
+  -c:s srt \
+  -f null -
+
 FATE_STREAMCOPY-$(call REMUX, MP4 MOV, EAC3_DEMUXER) += fate-copy-trac3074
 fate-copy-trac3074: CMD = transcode eac3 $(TARGET_SAMPLES)/eac3/csi_miami_stereo_128_spx.eac3\
                      mp4 "-codec copy -map 0" "-codec copy"
@@ -175,6 +190,7 @@ fate-copy-shortest1: CMD = framemd5 -auto_conversion_filters -fflags +bitexact -
 fate-copy-shortest2: CMD = framemd5 -auto_conversion_filters -fflags +bitexact -flags +bitexact -f lavfi -i "sine=3000:d=10" -i $(TARGET_PATH)/tests/data/audio_shorter_than_video.nut -filter_complex "[0:a:0][1:a:0]amix=inputs=2[audio]" -map 1:v:0 -map "[audio]" -fflags +bitexact -flags +bitexact -c:v copy -c:a ac3_fixed -shortest
 
 fate-streamcopy: $(FATE_STREAMCOPY-yes)
+FATE_SAMPLES_FFMPEG-yes += $(FATE_STREAMCOPY-yes)
 
 FATE_SAMPLES_FFMPEG-$(call TRANSCODE, RAWVIDEO, MATROSKA, MOV_DEMUXER QTRLE_DECODER) += fate-rgb24-mkv
 fate-rgb24-mkv: CMD = transcode "mov" $(TARGET_SAMPLES)/qtrle/aletrek-rle.mov\
@@ -203,9 +219,11 @@ fate-ffmpeg-bsf-remove-e: CMD = transcode "mpeg" $(TARGET_SAMPLES)/mpeg2/matrixb
 FATE_SAMPLES_FFMPEG-$(call DEMMUX, APNG, FRAMECRC, SETTS_BSF PIPE_PROTOCOL) += fate-ffmpeg-setts-bsf
 fate-ffmpeg-setts-bsf: CMD = framecrc -i $(TARGET_SAMPLES)/apng/clock.png -c:v copy -bsf:v "setts=duration=if(eq(NEXT_PTS\,NOPTS)\,PREV_OUTDURATION\,(NEXT_PTS-PTS)/2):ts=PTS/2" -fflags +bitexact
 
-FATE_SAMPLES_FFMPEG-yes += $(FATE_STREAMCOPY-yes)
-
 FATE_TIME_BASE-$(call PARSERDEMDEC, MPEGVIDEO, MPEGPS, MPEG2VIDEO, MPEGVIDEO_DEMUXER MXF_MUXER) += fate-time_base
 fate-time_base: CMD = md5 -i $(TARGET_SAMPLES)/mpeg2/dvd_single_frame.vob -an -sn -c:v copy -r 25 -time_base 1001:30000 -fflags +bitexact -f mxf
 
 FATE_SAMPLES_FFMPEG-yes += $(FATE_TIME_BASE-yes)
+
+# test -r used as an input option
+fate-ffmpeg-input-r: CMD = framecrc -r 27 -idct simple -i $(TARGET_SAMPLES)/mpeg2/sony-ct3.bs
+FATE_SAMPLES_FFMPEG-$(call FRAMECRC, MPEGVIDEO, MPEG2VIDEO) += fate-ffmpeg-input-r
