@@ -18,6 +18,7 @@
 
 #include "libavutil/crc.h"
 #include "libavutil/float_dsp.h"
+#include "libavutil/mem.h"
 #include "libavutil/mem_internal.h"
 #include "libavutil/tx.h"
 
@@ -65,6 +66,7 @@ typedef struct HCAContext {
     uint8_t stereo_band_count;
     uint8_t bands_per_hfr_group;
 
+    // Set during init() and freed on close(). Untouched on init_flush()
     av_tx_fn           tx_fn;
     AVTXContext       *tx_ctx;
     AVFloatDSPContext *fdsp;
@@ -196,6 +198,13 @@ static inline unsigned ceil2(unsigned a, unsigned b)
     return (b > 0) ? (a / b + ((a % b) ? 1 : 0)) : 0;
 }
 
+static av_cold void init_flush(AVCodecContext *avctx)
+{
+    HCAContext *c = avctx->priv_data;
+
+    memset(c, 0, offsetof(HCAContext, tx_fn));
+}
+
 static int init_hca(AVCodecContext *avctx, const uint8_t *extradata,
                     const int extradata_size)
 {
@@ -204,6 +213,9 @@ static int init_hca(AVCodecContext *avctx, const uint8_t *extradata,
     int8_t r[16] = { 0 };
     unsigned b, chunk;
     int version, ret;
+    unsigned hfr_group_count;
+
+    init_flush(avctx);
 
     if (extradata_size < 36)
         return AVERROR_INVALIDDATA;
@@ -326,11 +338,12 @@ static int init_hca(AVCodecContext *avctx, const uint8_t *extradata,
     if (c->total_band_count < c->base_band_count)
         return AVERROR_INVALIDDATA;
 
-    c->hfr_group_count = ceil2(c->total_band_count - (c->base_band_count + c->stereo_band_count),
+    hfr_group_count = ceil2(c->total_band_count - (c->base_band_count + c->stereo_band_count),
                                c->bands_per_hfr_group);
 
-    if (c->base_band_count + c->stereo_band_count + (unsigned long)c->hfr_group_count > 128ULL)
+    if (c->base_band_count + c->stereo_band_count + (uint64_t)hfr_group_count > 128ULL)
         return AVERROR_INVALIDDATA;
+    c->hfr_group_count = hfr_group_count;
 
     for (int i = 0; i < avctx->ch_layout.nb_channels; i++) {
         c->ch[i].chan_type = r[i];
@@ -339,6 +352,9 @@ static int init_hca(AVCodecContext *avctx, const uint8_t *extradata,
         if (c->ch[i].count > 128)
             return AVERROR_INVALIDDATA;
     }
+
+    // Done last to signal init() finished
+    c->crc_table = av_crc_get_table(AV_CRC_16_ANSI);
 
     return 0;
 }
@@ -350,7 +366,6 @@ static av_cold int decode_init(AVCodecContext *avctx)
     int ret;
 
     avctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
-    c->crc_table = av_crc_get_table(AV_CRC_16_ANSI);
 
     if (avctx->ch_layout.nb_channels <= 0 || avctx->ch_layout.nb_channels > FF_ARRAY_ELEMS(c->ch))
         return AVERROR(EINVAL);
@@ -524,8 +539,10 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
             return AVERROR_INVALIDDATA;
         } else if (AV_RB16(avpkt->data + 6) <= avpkt->size) {
             ret = init_hca(avctx, avpkt->data, AV_RB16(avpkt->data + 6));
-            if (ret < 0)
+            if (ret < 0) {
+                c->crc_table = NULL; // signal that init has not finished
                 return ret;
+            }
             offset = AV_RB16(avpkt->data + 6);
             if (offset == avpkt->size)
                 return avpkt->size;
@@ -533,6 +550,9 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
             return AVERROR_INVALIDDATA;
         }
     }
+
+    if (!c->crc_table)
+        return AVERROR_INVALIDDATA;
 
     if (c->key || c->subkey) {
         uint8_t *data, *cipher = c->cipher;
@@ -594,6 +614,14 @@ static av_cold int decode_close(AVCodecContext *avctx)
     return 0;
 }
 
+static av_cold void decode_flush(AVCodecContext *avctx)
+{
+    HCAContext *c = avctx->priv_data;
+
+    for (int ch = 0; ch < MAX_CHANNELS; ch++)
+        memset(c->ch[ch].imdct_prev, 0, sizeof(c->ch[ch].imdct_prev));
+}
+
 const FFCodec ff_hca_decoder = {
     .p.name         = "hca",
     CODEC_LONG_NAME("CRI HCA"),
@@ -602,9 +630,9 @@ const FFCodec ff_hca_decoder = {
     .priv_data_size = sizeof(HCAContext),
     .init           = decode_init,
     FF_CODEC_DECODE_CB(decode_frame),
+    .flush          = decode_flush,
     .close          = decode_close,
     .p.capabilities = AV_CODEC_CAP_DR1,
     .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
-    .p.sample_fmts  = (const enum AVSampleFormat[]) { AV_SAMPLE_FMT_FLTP,
-                                                      AV_SAMPLE_FMT_NONE },
+    CODEC_SAMPLEFMTS(AV_SAMPLE_FMT_FLTP),
 };

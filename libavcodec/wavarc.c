@@ -19,13 +19,12 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "libavutil/internal.h"
 #include "libavutil/intreadwrite.h"
+#include "libavutil/mem.h"
 #include "avcodec.h"
 #include "codec_internal.h"
 #include "decode.h"
 #include "get_bits.h"
-#include "bytestream.h"
 #include "mathops.h"
 #include "unary.h"
 
@@ -111,7 +110,7 @@ static av_cold int wavarc_init(AVCodecContext *avctx)
     }
 
     s->max_framesize = s->nb_samples * 16;
-    s->bitstream = av_calloc(s->max_framesize, sizeof(*s->bitstream));
+    s->bitstream = av_calloc(s->max_framesize + AV_INPUT_BUFFER_PADDING_SIZE, sizeof(*s->bitstream));
     if (!s->bitstream)
         return AVERROR(ENOMEM);
 
@@ -154,11 +153,11 @@ static void do_stereo(WavArcContext *s, int ch, int correlated, int len)
     } else {
         if (correlated) {
             for (int n = 0; n < nb_samples; n++)
-                s->samples[1][n + len] += s->samples[0][n + len];
+                s->samples[1][n + len] += (unsigned)s->samples[0][n + len];
         }
         for (int n = 0; n < len; n++) {
             s->pred[0][n] = s->samples[1][nb_samples + n];
-            s->pred[1][n] = s->pred[0][n] - s->samples[0][nb_samples + n];
+            s->pred[1][n] = s->pred[0][n] - (unsigned)s->samples[0][nb_samples + n];
         }
     }
 }
@@ -374,7 +373,7 @@ static int decode_2slp(AVCodecContext *avctx,
                 for (int o = 0; o < order; o++)
                     sum += s->filter[ch][o] * (unsigned)samples[n + 70 - o - 1];
 
-                samples[n + 70] = get_srice(gb, k) + (sum >> 4);
+                samples[n + 70] = get_srice(gb, k) + (unsigned)(sum >> 4);
             }
             finished = 1;
             break;
@@ -414,7 +413,7 @@ static int ac_init(AVCodecContext *avctx,
 
 static uint16_t ac_get_prob(WavArcContext *s)
 {
-    return ((s->freq_range - 1) + (s->ac_value - s->ac_low) * s->freq_range) /
+    return ((s->freq_range - 1) + (s->ac_value - s->ac_low) * (unsigned)s->freq_range) /
            ((s->ac_high - s->ac_low) + 1U);
 }
 
@@ -439,8 +438,8 @@ static int ac_normalize(AVCodecContext *avctx, WavArcContext *s, GetBitContext *
         goto fail;
 
     range = (s->ac_high - s->ac_low) + 1;
-    s->ac_high = (range * s->range_high) / s->freq_range + s->ac_low - 1;
-    s->ac_low += (range * s->range_low)  / s->freq_range;
+    s->ac_high = (range * (unsigned)s->range_high) / s->freq_range + s->ac_low - 1;
+    s->ac_low += (range * (unsigned)s->range_low)  / s->freq_range;
 
     if (s->ac_high < s->ac_low)
         goto fail;
@@ -539,6 +538,8 @@ static int decode_5elp(AVCodecContext *avctx,
         if (block_type >= 0 && block_type <= 7) {
             k = 1 + (avctx->sample_fmt == AV_SAMPLE_FMT_S16P);
             k = get_urice(gb, k) + 1;
+            if (k >= 32)
+                return AVERROR_INVALIDDATA;
         }
 
         if (block_type <=  2 || block_type ==  6 || block_type == 13 ||
@@ -646,7 +647,7 @@ static int decode_5elp(AVCodecContext *avctx,
                 for (int o = 0; o < order; o++)
                     sum += s->filter[ch][o] * (unsigned)samples[n + 70 - o - 1];
 
-                samples[n + 70] += ac_out[n] + (sum >> 4);
+                samples[n + 70] += ac_out[n] + (unsigned)(sum >> 4);
             }
 
             for (int n = 0; n < 70; n++)
@@ -688,7 +689,7 @@ static int decode_5elp(AVCodecContext *avctx,
                 for (int o = 0; o < order; o++)
                     sum += s->filter[ch][o] * (unsigned)samples[n + 70 - o - 1];
 
-                samples[n + 70] += ac_out[n] + (sum >> 4);
+                samples[n + 70] += ac_out[n] + (unsigned)(sum >> 4);
             }
 
             for (int n = 0; n < 70; n++)
@@ -880,11 +881,6 @@ const FFCodec ff_wavarc_decoder = {
     FF_CODEC_DECODE_CB(wavarc_decode),
     .close            = wavarc_close,
     .p.capabilities   = AV_CODEC_CAP_DR1 |
-#if FF_API_SUBFRAMES
-                        AV_CODEC_CAP_SUBFRAMES |
-#endif
                         AV_CODEC_CAP_DELAY,
-    .p.sample_fmts    = (const enum AVSampleFormat[]) { AV_SAMPLE_FMT_U8P,
-                                                        AV_SAMPLE_FMT_S16P,
-                                                        AV_SAMPLE_FMT_NONE },
+    CODEC_SAMPLEFMTS(AV_SAMPLE_FMT_U8P, AV_SAMPLE_FMT_S16P),
 };

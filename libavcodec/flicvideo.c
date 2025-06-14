@@ -642,7 +642,7 @@ static int flic_decode_frame_8BPP(AVCodecContext *avctx,
                        "has incorrect size, skipping chunk\n", chunk_size - 6);
                 bytestream2_skip(&g2, chunk_size - 6);
             } else {
-                for (y_ptr = 0; check_pixel_ptr(y_ptr, 0, pixel_limit, direction) == 0;
+                for (y_ptr = 0; check_pixel_ptr(y_ptr, s->avctx->width, pixel_limit, direction) == 0;
                      y_ptr += s->frame->linesize[0]) {
                     bytestream2_get_buffer(&g2, &pixels[y_ptr],
                                            s->avctx->width);
@@ -682,11 +682,6 @@ static int flic_decode_frame_8BPP(AVCodecContext *avctx,
     /* make the palette available on the way out */
     memcpy(s->frame->data[1], s->palette, AVPALETTE_SIZE);
     if (s->new_palette) {
-#if FF_API_PALETTE_HAS_CHANGED
-FF_DISABLE_DEPRECATION_WARNINGS
-        s->frame->palette_has_changed = 1;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
         s->new_palette = 0;
     }
 
@@ -949,7 +944,7 @@ static int flic_decode_frame_15_16BPP(AVCodecContext *avctx,
 
                 if (bytestream2_get_bytes_left(&g2) < 2 * s->avctx->width * s->avctx->height )
                     return AVERROR_INVALIDDATA;
-                for (y_ptr = 0; check_pixel_ptr(y_ptr, 0, pixel_limit, direction) == 0;
+                for (y_ptr = 0; check_pixel_ptr(y_ptr, 2*s->avctx->width, pixel_limit, direction) == 0;
                      y_ptr += s->frame->linesize[0]) {
 
                     pixel_countdown = s->avctx->width;
@@ -1235,7 +1230,7 @@ static int flic_decode_frame_24BPP(AVCodecContext *avctx,
                        "bigger than image, skipping chunk\n", chunk_size - 6);
                 bytestream2_skip(&g2, chunk_size - 6);
             } else {
-                for (y_ptr = 0; check_pixel_ptr(y_ptr, 0, pixel_limit, direction) == 0;
+                for (y_ptr = 0; check_pixel_ptr(y_ptr, 3*s->avctx->width, pixel_limit, direction) == 0;
                      y_ptr += s->frame->linesize[0]) {
 
                     bytestream2_get_buffer(&g2, pixels + y_ptr, 3*s->avctx->width);

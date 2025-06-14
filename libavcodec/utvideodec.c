@@ -31,6 +31,7 @@
 #define UNCHECKED_BITSTREAM_READER 1
 
 #include "libavutil/intreadwrite.h"
+#include "libavutil/mem.h"
 #include "libavutil/pixdesc.h"
 #include "avcodec.h"
 #include "bswapdsp.h"
@@ -120,7 +121,7 @@ static int build_huff(UtvideoContext *c, const uint8_t *src, VLC *vlc,
     i = 0; \
     for (; CACHED_BITSTREAM_READER && i < width-end && get_bits_left(&gb) > 0;) {\
         ret = get_vlc_multi(&gb, (uint8_t *)buf + i * b, multi.table, \
-                            vlc.table, VLC_BITS, 3); \
+                            vlc.table, VLC_BITS, 3, b); \
         if (ret > 0) \
             i += ret; \
         if (ret <= 0) \
@@ -889,8 +890,6 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
         break;
     }
 
-    frame->flags |= AV_FRAME_FLAG_KEY;
-    frame->pict_type = AV_PICTURE_TYPE_I;
     if (c->interlaced)
         frame->flags |= AV_FRAME_FLAG_INTERLACED;
 
@@ -1012,10 +1011,6 @@ static av_cold int decode_init(AVCodecContext *avctx)
         return AVERROR_INVALIDDATA;
     }
 
-    c->buffer = av_calloc(avctx->width + 8, c->pro?2:1);
-    if (!c->buffer)
-        return AVERROR(ENOMEM);
-
     av_pix_fmt_get_chroma_sub_sample(avctx->pix_fmt, &h_shift, &v_shift);
     if ((avctx->width  & ((1<<h_shift)-1)) ||
         (avctx->height & ((1<<v_shift)-1))) {
@@ -1062,6 +1057,10 @@ static av_cold int decode_init(AVCodecContext *avctx)
                avctx->extradata_size);
         return AVERROR_INVALIDDATA;
     }
+
+    c->buffer = av_calloc(avctx->width + 8, c->pro?2:1);
+    if (!c->buffer)
+        return AVERROR(ENOMEM);
 
     return 0;
 }

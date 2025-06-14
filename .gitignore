@@ -1,6 +1,7 @@
 log.txt
 *.a
 *.o
+*.objs
 *.o.*
 *.d
 *.def
@@ -43,3 +44,6 @@ log.txt
 /mapfile
 /tools/python/__pycache__/
 /bin
+/libavcodec/vulkan/*.c
+/libavfilter/vulkan/*.c
+/.*/

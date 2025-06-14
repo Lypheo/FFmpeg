@@ -16,6 +16,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "libavutil/mem.h"
 #include "get_bits.h"
 #include "golomb.h"
 #include "evc.h"
@@ -179,6 +180,10 @@ int ff_evc_parse_sps(GetBitContext *gb, EVCParamSets *ps)
     // 2 - 4:2:2
     // 3 - 4:4:4
     sps->chroma_format_idc = get_ue_golomb_31(gb);
+    if (sps->chroma_format_idc > 3) {
+        ret = AVERROR_INVALIDDATA;
+        goto fail;
+    }
 
     sps->pic_width_in_luma_samples = get_ue_golomb_long(gb);
     sps->pic_height_in_luma_samples = get_ue_golomb_long(gb);
